@@ -867,6 +867,7 @@ pub async fn gateway_add(
     oidc_client_id: &str,
     oidc_audience: Option<&str>,
     oidc_scopes: Option<&str>,
+    oidc_redirect_uri: Option<&str>,
     gateway_insecure: bool,
 ) -> Result<()> {
     // If the endpoint starts with ssh://, parse it into an SSH destination
@@ -950,6 +951,8 @@ pub async fn gateway_add(
     // OIDC takes precedence over plaintext/mTLS/edge detection — the user
     // explicitly opted in with --oidc-issuer regardless of scheme.
     if let Some(issuer) = oidc_issuer {
+        crate::oidc_auth::validate_redirect_uri(oidc_redirect_uri)?;
+
         let metadata = GatewayMetadata {
             name: name.to_string(),
             gateway_endpoint: endpoint.clone(),
@@ -959,6 +962,7 @@ pub async fn gateway_add(
             oidc_client_id: Some(oidc_client_id.to_string()),
             oidc_audience: oidc_audience.map(String::from),
             oidc_scopes: oidc_scopes.map(String::from),
+            oidc_redirect_uri: oidc_redirect_uri.map(String::from),
             ..Default::default()
         };
 
@@ -1002,6 +1006,7 @@ pub async fn gateway_add(
                 oidc_client_id,
                 oidc_audience,
                 oidc_scopes,
+                oidc_redirect_uri,
                 gateway_insecure,
             )
             .await
@@ -1200,6 +1205,7 @@ pub async fn gateway_login(name: &str, gateway_insecure: bool) -> Result<()> {
                 .unwrap_or("openshell-cli");
             let audience = metadata.oidc_audience.as_deref();
             let scopes = metadata.oidc_scopes.as_deref();
+            let redirect_uri = metadata.oidc_redirect_uri.as_deref();
 
             let bundle = if std::env::var("OPENSHELL_OIDC_CLIENT_SECRET").is_ok() {
                 crate::oidc_auth::oidc_client_credentials_flow(
@@ -1216,6 +1222,7 @@ pub async fn gateway_login(name: &str, gateway_insecure: bool) -> Result<()> {
                     client_id,
                     audience,
                     scopes,
+                    redirect_uri,
                     gateway_insecure,
                 )
                 .await?
@@ -8484,6 +8491,42 @@ mod tests {
     }
 
     #[test]
+    fn gateway_add_rejects_invalid_oidc_redirect_uri_before_storing_metadata() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let tmpdir = tempfile::tempdir().expect("create tmpdir");
+        with_tmp_xdg(tmpdir.path(), || {
+            let runtime = tokio::runtime::Runtime::new().expect("create runtime");
+            let error = runtime
+                .block_on(async {
+                    gateway_add(
+                        "https://gateway.example.com",
+                        Some("bad-oidc"),
+                        None,
+                        false,
+                        Some("https://idp.example.com/realms/openshell"),
+                        "openshell-cli",
+                        None,
+                        None,
+                        Some("https://127.0.0.1:8765/callback"),
+                        false,
+                    )
+                    .await
+                })
+                .expect_err("invalid redirect URI should fail before storing metadata");
+
+            assert!(
+                error.to_string().contains("must use http://"),
+                "unexpected error: {error}"
+            );
+            assert!(
+                load_gateway_metadata("bad-oidc").is_err(),
+                "invalid OIDC redirect URI must not persist gateway metadata"
+            );
+            assert_eq!(load_active_gateway(), None);
+        });
+    }
+
+    #[test]
     fn gateway_add_registers_plaintext_loopback_gateway_without_local_flag() {
         let _ = rustls::crypto::ring::default_provider().install_default();
         let tmpdir = tempfile::tempdir().expect("create tmpdir");
@@ -8497,6 +8540,7 @@ mod tests {
                     false,
                     None,
                     "openshell-cli",
+                    None,
                     None,
                     None,
                     false,
@@ -8529,6 +8573,7 @@ mod tests {
                     true,
                     None,
                     "openshell-cli",
+                    None,
                     None,
                     None,
                     false,

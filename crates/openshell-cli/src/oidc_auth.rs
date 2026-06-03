@@ -13,7 +13,7 @@ use hyper::service::service_fn;
 use hyper::{Method, Response, StatusCode};
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use hyper_util::server::conn::auto::Builder;
-use miette::{IntoDiagnostic, Result};
+use miette::{IntoDiagnostic, Result, WrapErr};
 use oauth2::basic::BasicClient;
 use oauth2::{
     AuthType, AuthUrl, AuthorizationCode, ClientId, ClientSecret, CsrfToken, PkceCodeChallenge,
@@ -27,6 +27,7 @@ use std::time::Duration;
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 use tracing::debug;
+use url::Url;
 
 const AUTH_TIMEOUT: Duration = Duration::from_secs(120);
 
@@ -95,6 +96,59 @@ fn build_ci_scopes(scopes: Option<&str>) -> Vec<Scope> {
         .collect()
 }
 
+struct RedirectBinding {
+    bind_addr: String,
+    callback_path: String,
+    redirect_uri: Option<String>,
+}
+
+pub fn validate_redirect_uri(redirect_uri: Option<&str>) -> Result<()> {
+    redirect_binding(redirect_uri).map(|_| ())
+}
+
+fn redirect_binding(redirect_uri: Option<&str>) -> Result<RedirectBinding> {
+    let Some(redirect_uri) = redirect_uri else {
+        return Ok(RedirectBinding {
+            bind_addr: "127.0.0.1:0".to_string(),
+            callback_path: "/callback".to_string(),
+            redirect_uri: None,
+        });
+    };
+
+    let parsed = Url::parse(redirect_uri)
+        .into_diagnostic()
+        .map_err(|err| err.wrap_err("invalid OIDC redirect URI"))?;
+    if parsed.scheme() != "http" {
+        return Err(miette::miette!(
+            "OIDC redirect URI must use http:// so the local callback listener can receive it"
+        ));
+    }
+    let host = parsed
+        .host_str()
+        .filter(|host| !host.is_empty())
+        .ok_or_else(|| miette::miette!("OIDC redirect URI must include a host"))?;
+    let port = parsed
+        .port()
+        .ok_or_else(|| miette::miette!("OIDC redirect URI must include an explicit port"))?;
+    let path = parsed.path();
+    if path == "/" {
+        return Err(miette::miette!(
+            "OIDC redirect URI must include an explicit callback path"
+        ));
+    }
+    let bind_addr = if host.contains(':') {
+        format!("[{host}]:{port}")
+    } else {
+        format!("{host}:{port}")
+    };
+
+    Ok(RedirectBinding {
+        bind_addr,
+        callback_path: path.to_string(),
+        redirect_uri: Some(redirect_uri.to_string()),
+    })
+}
+
 /// Run the OIDC Authorization Code + PKCE browser flow.
 ///
 /// Opens the user's browser to the Keycloak login page and waits for
@@ -104,13 +158,28 @@ pub async fn oidc_browser_auth_flow(
     client_id: &str,
     audience: Option<&str>,
     scopes: Option<&str>,
+    redirect_uri: Option<&str>,
     insecure: bool,
 ) -> Result<OidcTokenBundle> {
     let discovery = discover(issuer, insecure).await?;
 
-    let listener = TcpListener::bind("127.0.0.1:0").await.into_diagnostic()?;
-    let port = listener.local_addr().into_diagnostic()?.port();
-    let redirect_uri = format!("http://127.0.0.1:{port}/callback");
+    let redirect = redirect_binding(redirect_uri)?;
+    let listener = TcpListener::bind(&redirect.bind_addr)
+        .await
+        .into_diagnostic()
+        .wrap_err_with(|| {
+            format!(
+                "failed to bind OIDC redirect listener at {}",
+                redirect.bind_addr
+            )
+        })?;
+    let redirect_uri = match redirect.redirect_uri {
+        Some(uri) => uri,
+        None => {
+            let port = listener.local_addr().into_diagnostic()?.port();
+            format!("http://127.0.0.1:{port}/callback")
+        }
+    };
 
     let client = BasicClient::new(ClientId::new(client_id.to_string()))
         .set_auth_uri(AuthUrl::new(discovery.authorization_endpoint).into_diagnostic()?)
@@ -138,7 +207,12 @@ pub async fn oidc_browser_auth_flow(
     let (tx, rx) = oneshot::channel::<String>();
     let expected_state = csrf_token.secret().clone();
 
-    let server_handle = tokio::spawn(run_oidc_callback_server(listener, tx, expected_state));
+    let server_handle = tokio::spawn(run_oidc_callback_server(
+        listener,
+        tx,
+        expected_state,
+        redirect.callback_path,
+    ));
 
     eprintln!("  Opening browser for OIDC authentication...");
     if let Err(e) = crate::auth::open_browser_url(auth_url.as_str()) {
@@ -330,6 +404,7 @@ fn percent_decode(s: &str) -> String {
 /// Callback server state.
 struct CallbackState {
     expected_state: String,
+    callback_path: String,
     tx: Mutex<Option<oneshot::Sender<String>>>,
 }
 
@@ -349,9 +424,11 @@ async fn run_oidc_callback_server(
     listener: TcpListener,
     tx: oneshot::Sender<String>,
     expected_state: String,
+    callback_path: String,
 ) {
     let state = Arc::new(CallbackState {
         expected_state,
+        callback_path,
         tx: Mutex::new(Some(tx)),
     });
 
@@ -380,7 +457,7 @@ fn handle_oidc_callback(
     req: hyper::Request<hyper::body::Incoming>,
     state: Arc<CallbackState>,
 ) -> Response<Full<Bytes>> {
-    if req.method() != Method::GET || !req.uri().path().starts_with("/callback") {
+    if req.method() != Method::GET || req.uri().path() != state.callback_path {
         return Response::builder()
             .status(StatusCode::NOT_FOUND)
             .body(Full::new(Bytes::from("not found")))
@@ -485,6 +562,44 @@ mod tests {
         // Same as above but with insecure=true. Should still fail on
         // connection (no server) but must not panic.
         let result = rt.block_on(discover("https://127.0.0.1:1/realms/test", true));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn redirect_binding_defaults_to_ephemeral_callback() {
+        let binding = redirect_binding(None).expect("default redirect binding");
+        assert_eq!(binding.bind_addr, "127.0.0.1:0");
+        assert_eq!(binding.callback_path, "/callback");
+        assert_eq!(binding.redirect_uri, None);
+    }
+
+    #[test]
+    fn redirect_binding_accepts_fixed_http_uri_with_port() {
+        let binding = redirect_binding(Some("http://127.0.0.1:8765/oidc/callback"))
+            .expect("fixed redirect binding");
+        assert_eq!(binding.bind_addr, "127.0.0.1:8765");
+        assert_eq!(binding.callback_path, "/oidc/callback");
+        assert_eq!(
+            binding.redirect_uri.as_deref(),
+            Some("http://127.0.0.1:8765/oidc/callback"),
+        );
+    }
+
+    #[test]
+    fn redirect_binding_rejects_https_uri() {
+        let result = redirect_binding(Some("https://127.0.0.1:8765/callback"));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn redirect_binding_requires_explicit_port() {
+        let result = redirect_binding(Some("http://127.0.0.1/callback"));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn redirect_binding_requires_explicit_callback_path() {
+        let result = redirect_binding(Some("http://127.0.0.1:8765"));
         assert!(result.is_err());
     }
 

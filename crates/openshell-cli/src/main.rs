@@ -1004,6 +1004,11 @@ enum GatewayCommands {
         /// When set, tokens will include these scopes for fine-grained access control.
         #[arg(long, requires = "oidc_issuer")]
         oidc_scopes: Option<String>,
+
+        /// Fixed redirect URI for OIDC browser login.
+        /// Must be an HTTP URI with an explicit host and port.
+        #[arg(long, requires = "oidc_issuer")]
+        oidc_redirect_uri: Option<String>,
     },
 
     /// Remove a local gateway registration.
@@ -1933,6 +1938,7 @@ async fn main() -> Result<()> {
                 oidc_client_id,
                 oidc_audience,
                 oidc_scopes,
+                oidc_redirect_uri,
             } => {
                 run::gateway_add(
                     &endpoint,
@@ -1943,6 +1949,7 @@ async fn main() -> Result<()> {
                     &oidc_client_id,
                     oidc_audience.as_deref(),
                     oidc_scopes.as_deref(),
+                    oidc_redirect_uri.as_deref(),
                     cli.gateway_insecure,
                 )
                 .await?;
@@ -3754,6 +3761,36 @@ mod tests {
     fn sandbox_list_json_conflicts_with_names() {
         let result = Cli::try_parse_from(["openshell", "sandbox", "list", "-o", "json", "--names"]);
         assert!(result.is_err(), "--names and -o json should conflict");
+    }
+
+    #[test]
+    fn gateway_add_accepts_oidc_redirect_uri() {
+        let cli = Cli::try_parse_from([
+            "openshell",
+            "gateway",
+            "add",
+            "https://gateway.example.com",
+            "--oidc-issuer",
+            "https://idp.example.com/realms/openshell",
+            "--oidc-redirect-uri",
+            "http://127.0.0.1:8765/callback",
+        ])
+        .expect("gateway add should parse oidc redirect URI");
+
+        match cli.command {
+            Some(Commands::Gateway {
+                command:
+                    Some(GatewayCommands::Add {
+                        oidc_redirect_uri, ..
+                    }),
+            }) => {
+                assert_eq!(
+                    oidc_redirect_uri.as_deref(),
+                    Some("http://127.0.0.1:8765/callback"),
+                );
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
     }
 
     #[test]
