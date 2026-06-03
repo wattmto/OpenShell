@@ -114,7 +114,20 @@ openshell gateway add https://gateway.example.com \
   --oidc-audience openshell-cli
 ```
 
-When you register or log in to an OIDC gateway, the CLI uses the Authorization Code flow with PKCE. It opens a browser, receives the authorization code on a localhost callback, exchanges the code for tokens, and stores the token bundle under the gateway credential directory. If `OPENSHELL_OIDC_CLIENT_SECRET` is set, the CLI uses the client credentials flow instead. Use that mode for CI and other non-interactive automation.
+By default, the CLI listens on an ephemeral localhost port and sends a matching redirect URI such as `http://127.0.0.1:<port>/callback` to the identity provider. If your OIDC client must allowlist one fixed redirect URI, pass `--oidc-redirect-uri` during registration:
+
+```shell
+openshell gateway add https://gateway.example.com \
+  --name production \
+  --oidc-issuer https://idp.example.com/realms/openshell \
+  --oidc-client-id openshell-cli \
+  --oidc-audience openshell-cli \
+  --oidc-redirect-uri http://127.0.0.1:8765/callback
+```
+
+The fixed redirect URI must use `http://` and include an explicit host, port, and path. Register the same URI with your identity provider. OpenShell stores it with the gateway metadata so `openshell gateway login` reuses the same redirect URI.
+
+When you register or log in to an OIDC gateway, the CLI uses the Authorization Code flow with PKCE. It opens a browser, receives the authorization code on the configured localhost callback, exchanges the code for tokens, and stores the token bundle under the gateway credential directory. If `OPENSHELL_OIDC_CLIENT_SECRET` is set, the CLI uses the client credentials flow instead. Use that mode for CI and other non-interactive automation.
 
 The connection flow:
 
@@ -192,4 +205,4 @@ openshell/
       last_sandbox                  # Last-used sandbox for this gateway
 ```
 
-For OIDC gateways, `metadata.json` also stores the issuer, CLI client ID, optional audience, and requested scopes. Treat `oidc_token.json` as a credential. OpenShell writes it with owner-only file permissions.
+For OIDC gateways, `metadata.json` also stores the issuer, CLI client ID, optional audience, requested scopes, and optional fixed redirect URI. Treat `oidc_token.json` as a credential. OpenShell writes it with owner-only file permissions.
