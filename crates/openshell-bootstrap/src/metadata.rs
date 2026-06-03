@@ -65,9 +65,9 @@ pub struct GatewayMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub oidc_scopes: Option<String>,
 
-    /// Fixed OIDC redirect URI for the CLI browser login flow.
+    /// Fixed localhost callback port for the CLI OIDC browser login flow.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub oidc_redirect_uri: Option<String>,
+    pub oidc_redirect_port: Option<u16>,
 
     /// Local VM driver state directory for standalone VM gateways.
     #[serde(default, skip_serializing_if = "Option::is_none")]

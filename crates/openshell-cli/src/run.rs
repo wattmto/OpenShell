@@ -867,7 +867,7 @@ pub async fn gateway_add(
     oidc_client_id: &str,
     oidc_audience: Option<&str>,
     oidc_scopes: Option<&str>,
-    oidc_redirect_uri: Option<&str>,
+    oidc_redirect_port: Option<u16>,
     gateway_insecure: bool,
 ) -> Result<()> {
     // If the endpoint starts with ssh://, parse it into an SSH destination
@@ -951,7 +951,7 @@ pub async fn gateway_add(
     // OIDC takes precedence over plaintext/mTLS/edge detection — the user
     // explicitly opted in with --oidc-issuer regardless of scheme.
     if let Some(issuer) = oidc_issuer {
-        crate::oidc_auth::validate_redirect_uri(oidc_redirect_uri)?;
+        crate::oidc_auth::validate_redirect_port(oidc_redirect_port)?;
 
         let metadata = GatewayMetadata {
             name: name.to_string(),
@@ -962,7 +962,7 @@ pub async fn gateway_add(
             oidc_client_id: Some(oidc_client_id.to_string()),
             oidc_audience: oidc_audience.map(String::from),
             oidc_scopes: oidc_scopes.map(String::from),
-            oidc_redirect_uri: oidc_redirect_uri.map(String::from),
+            oidc_redirect_port,
             ..Default::default()
         };
 
@@ -1006,7 +1006,7 @@ pub async fn gateway_add(
                 oidc_client_id,
                 oidc_audience,
                 oidc_scopes,
-                oidc_redirect_uri,
+                oidc_redirect_port,
                 gateway_insecure,
             )
             .await
@@ -1205,7 +1205,7 @@ pub async fn gateway_login(name: &str, gateway_insecure: bool) -> Result<()> {
                 .unwrap_or("openshell-cli");
             let audience = metadata.oidc_audience.as_deref();
             let scopes = metadata.oidc_scopes.as_deref();
-            let redirect_uri = metadata.oidc_redirect_uri.as_deref();
+            let redirect_port = metadata.oidc_redirect_port;
 
             let bundle = if std::env::var("OPENSHELL_OIDC_CLIENT_SECRET").is_ok() {
                 crate::oidc_auth::oidc_client_credentials_flow(
@@ -1222,7 +1222,7 @@ pub async fn gateway_login(name: &str, gateway_insecure: bool) -> Result<()> {
                     client_id,
                     audience,
                     scopes,
-                    redirect_uri,
+                    redirect_port,
                     gateway_insecure,
                 )
                 .await?
@@ -8491,7 +8491,7 @@ mod tests {
     }
 
     #[test]
-    fn gateway_add_rejects_invalid_oidc_redirect_uri_before_storing_metadata() {
+    fn gateway_add_rejects_invalid_oidc_redirect_port_before_storing_metadata() {
         let _ = rustls::crypto::ring::default_provider().install_default();
         let tmpdir = tempfile::tempdir().expect("create tmpdir");
         with_tmp_xdg(tmpdir.path(), || {
@@ -8507,20 +8507,20 @@ mod tests {
                         "openshell-cli",
                         None,
                         None,
-                        Some("https://127.0.0.1:8765/callback"),
+                        Some(0),
                         false,
                     )
                     .await
                 })
-                .expect_err("invalid redirect URI should fail before storing metadata");
+                .expect_err("invalid redirect port should fail before storing metadata");
 
             assert!(
-                error.to_string().contains("must use http://"),
+                error.to_string().contains("must be between 1 and 65535"),
                 "unexpected error: {error}"
             );
             assert!(
                 load_gateway_metadata("bad-oidc").is_err(),
-                "invalid OIDC redirect URI must not persist gateway metadata"
+                "invalid OIDC redirect port must not persist gateway metadata"
             );
             assert_eq!(load_active_gateway(), None);
         });

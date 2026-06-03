@@ -1005,10 +1005,10 @@ enum GatewayCommands {
         #[arg(long, requires = "oidc_issuer")]
         oidc_scopes: Option<String>,
 
-        /// Fixed redirect URI for OIDC browser login.
-        /// Must be an HTTP URI with an explicit host and port.
+        /// Fixed localhost callback port for OIDC browser login.
+        /// When omitted, the CLI uses an ephemeral port.
         #[arg(long, requires = "oidc_issuer")]
-        oidc_redirect_uri: Option<String>,
+        oidc_redirect_port: Option<u16>,
     },
 
     /// Remove a local gateway registration.
@@ -1938,7 +1938,7 @@ async fn main() -> Result<()> {
                 oidc_client_id,
                 oidc_audience,
                 oidc_scopes,
-                oidc_redirect_uri,
+                oidc_redirect_port,
             } => {
                 run::gateway_add(
                     &endpoint,
@@ -1949,7 +1949,7 @@ async fn main() -> Result<()> {
                     &oidc_client_id,
                     oidc_audience.as_deref(),
                     oidc_scopes.as_deref(),
-                    oidc_redirect_uri.as_deref(),
+                    oidc_redirect_port,
                     cli.gateway_insecure,
                 )
                 .await?;
@@ -3764,7 +3764,7 @@ mod tests {
     }
 
     #[test]
-    fn gateway_add_accepts_oidc_redirect_uri() {
+    fn gateway_add_accepts_oidc_redirect_port() {
         let cli = Cli::try_parse_from([
             "openshell",
             "gateway",
@@ -3772,22 +3772,19 @@ mod tests {
             "https://gateway.example.com",
             "--oidc-issuer",
             "https://idp.example.com/realms/openshell",
-            "--oidc-redirect-uri",
-            "http://127.0.0.1:8765/callback",
+            "--oidc-redirect-port",
+            "8765",
         ])
-        .expect("gateway add should parse oidc redirect URI");
+        .expect("gateway add should parse oidc redirect port");
 
         match cli.command {
             Some(Commands::Gateway {
                 command:
                     Some(GatewayCommands::Add {
-                        oidc_redirect_uri, ..
+                        oidc_redirect_port, ..
                     }),
             }) => {
-                assert_eq!(
-                    oidc_redirect_uri.as_deref(),
-                    Some("http://127.0.0.1:8765/callback"),
-                );
+                assert_eq!(oidc_redirect_port, Some(8765));
             }
             other => panic!("unexpected command: {other:?}"),
         }
